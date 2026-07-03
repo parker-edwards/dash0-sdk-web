@@ -34,6 +34,10 @@ vi.mock("../instrumentations/navigation", () => ({
   startNavigationInstrumentation: vi.fn(),
 }));
 
+vi.mock("../instrumentations/interactions", () => ({
+  startInteractionInstrumentation: vi.fn(),
+}));
+
 // Mock the utils module to control loc.hostname
 vi.mock("../utils", async () => {
   const actual = await vi.importActual("../utils");
@@ -47,6 +51,7 @@ import { startErrorInstrumentation } from "../instrumentations/errors";
 import { instrumentFetch } from "../instrumentations/http/fetch";
 import { startNavigationInstrumentation } from "../instrumentations/navigation";
 import { startWebVitalsInstrumentation } from "../instrumentations/web-vitals";
+import { startInteractionInstrumentation } from "../instrumentations/interactions";
 
 describe("init", () => {
   const baseOptions: InitOptions = {
@@ -74,6 +79,10 @@ describe("init", () => {
   });
 
   describe("instrumentation enablement", () => {
+    beforeEach(() => {
+      vars.interactionInstrumentation.enabled = true;
+    });
+
     it("should enable all instrumentations when enabledInstrumentations is undefined", async () => {
       init({
         ...baseOptions,
@@ -91,12 +100,14 @@ describe("init", () => {
       "@dash0/web-vitals",
       "@dash0/error",
       "@dash0/fetch",
+      "@dash0/interactions",
     ];
     const instrumentationMocks = {
       "@dash0/navigation": startNavigationInstrumentation,
       "@dash0/web-vitals": startWebVitalsInstrumentation,
       "@dash0/error": startErrorInstrumentation,
       "@dash0/fetch": instrumentFetch,
+      "@dash0/interactions": startInteractionInstrumentation,
     };
 
     instrumentations.forEach((instrumentation) => {
@@ -130,6 +141,70 @@ describe("init", () => {
         otherInstrumentations.forEach((name) => {
           expect(instrumentationMocks[name]).toHaveBeenCalled();
         });
+      });
+    });
+  });
+
+  describe("interaction instrumentation settings gate", () => {
+    it("does not start interactions when enabledInstrumentations includes it but interactionInstrumentation.enabled is false (default)", async () => {
+      init({
+        ...baseOptions,
+        enabledInstrumentations: ["@dash0/interactions"],
+      });
+
+      expect(startInteractionInstrumentation).not.toHaveBeenCalled();
+    });
+
+    it("does not start interactions when interactionInstrumentation.enabled is true but enabledInstrumentations excludes it", async () => {
+      init({
+        ...baseOptions,
+        enabledInstrumentations: ["@dash0/navigation"],
+        interactionInstrumentation: { enabled: true },
+      });
+
+      expect(startInteractionInstrumentation).not.toHaveBeenCalled();
+    });
+
+    it("starts interactions when both gates pass: enabledInstrumentations includes it and interactionInstrumentation.enabled is true", async () => {
+      init({
+        ...baseOptions,
+        enabledInstrumentations: ["@dash0/interactions"],
+        interactionInstrumentation: { enabled: true },
+      });
+
+      expect(startInteractionInstrumentation).toHaveBeenCalled();
+    });
+
+    it("starts interactions when enabledInstrumentations is undefined (all enabled) and interactionInstrumentation.enabled is true", async () => {
+      init({
+        ...baseOptions,
+        interactionInstrumentation: { enabled: true },
+      });
+
+      expect(startInteractionInstrumentation).toHaveBeenCalled();
+    });
+
+    it("preserves the default actionNameAttribute when only enabled is overridden (nested settings shallow-merge)", async () => {
+      init({
+        ...baseOptions,
+        interactionInstrumentation: { enabled: true },
+      });
+
+      expect(vars.interactionInstrumentation).toEqual({
+        enabled: true,
+        actionNameAttribute: "data-dash0-action-name",
+      });
+    });
+
+    it("allows overriding actionNameAttribute independently", async () => {
+      init({
+        ...baseOptions,
+        interactionInstrumentation: { enabled: true, actionNameAttribute: "data-custom-name" },
+      });
+
+      expect(vars.interactionInstrumentation).toEqual({
+        enabled: true,
+        actionNameAttribute: "data-custom-name",
       });
     });
   });
