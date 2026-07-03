@@ -1,0 +1,80 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { KeyValue, LogRecord } from "../types/otlp";
+
+vi.mock("../transport", () => ({
+  sendLog: vi.fn(),
+}));
+
+import { sendLog } from "../transport";
+import { startView } from "./start-view";
+import { vars } from "../vars";
+
+const sendLogMock = sendLog as unknown as ReturnType<typeof vi.fn>;
+
+describe("startView", () => {
+  beforeEach(() => {
+    sendLogMock.mockClear();
+    vars.endpoints = [{ url: "https://example.com", authToken: "auth_abc123" }];
+    vars.pageViewInstrumentation = { trackVirtualPageViews: true, includeParts: [] };
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vars.endpoints = [];
+  });
+
+  it("accepts a string shorthand and uses it as the title", () => {
+    startView("/settings");
+
+    expect(sendLogMock).toHaveBeenCalledTimes(1);
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
+    expect(bodyValues).toEqual(expect.arrayContaining([{ key: "title", value: { stringValue: "/settings" } }]));
+  });
+
+  it("accepts an options object with name and attributes", () => {
+    startView({ name: "/settings", attributes: { "app.screen": "settings" } });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
+    expect(bodyValues).toEqual(expect.arrayContaining([{ key: "title", value: { stringValue: "/settings" } }]));
+    expect(log.attributes).toEqual(expect.arrayContaining([{ key: "app.screen", value: { stringValue: "settings" } }]));
+  });
+
+  it("parses a relative url option and reflects it in page.url.path", () => {
+    startView({ name: "/settings", url: "/settings" });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    expect(log.attributes).toEqual(
+      expect.arrayContaining([{ key: "page.url.path", value: { stringValue: "/settings" } }])
+    );
+  });
+
+  it("falls back to no url override and logs a debug message on an invalid url", () => {
+    startView({ name: "/settings", url: "http://" });
+
+    expect(sendLogMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch history or location", () => {
+    // eslint-disable-next-line no-restricted-globals
+    const originalHref = window.location.href;
+    // eslint-disable-next-line no-restricted-globals
+    const originalLength = window.history.length;
+
+    startView({ name: "/settings" });
+
+    // eslint-disable-next-line no-restricted-globals
+    expect(window.location.href).toBe(originalHref);
+    // eslint-disable-next-line no-restricted-globals
+    expect(window.history.length).toBe(originalLength);
+  });
+
+  it("is a no-op before init (no endpoints configured)", () => {
+    vars.endpoints = [];
+
+    startView("/settings");
+
+    expect(sendLogMock).not.toHaveBeenCalled();
+  });
+});
