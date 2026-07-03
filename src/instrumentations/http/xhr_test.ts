@@ -93,6 +93,9 @@ describe("xhr test", () => {
     NativeXHR = globalThis.XMLHttpRequest;
     vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
     vi.stubGlobal("location", { origin: "http://localhost:3000", href: "http://localhost:3000/" });
+    // Let the async resource-timing wait resolve on the next tick. See the comment on the first
+    // success-path test below for why the success path is asynchronous.
+    vars.maxWaitForResourceTimingsMillis = 0;
   });
 
   afterEach(() => {
@@ -101,6 +104,7 @@ describe("xhr test", () => {
     vars.propagators = undefined;
     vars.headersToCapture = [];
     vars.ignoreUrls = [];
+    vars.maxWaitForResourceTimingsMillis = 10000;
   });
 
   it("should inject traceparent header for same-origin requests", () => {
@@ -163,8 +167,13 @@ describe("xhr test", () => {
     expect(sendSpan).not.toHaveBeenCalled();
   });
 
-  // unskipped in the completion commit (Task 4)
-  it.skip("should capture matching request headers as span attributes", () => {
+  // The tests below that drive a request to *successful* completion must await sendSpan
+  // asynchronously: the success path routes span completion through observeResourcePerformance,
+  // which resolves asynchronously. jsdom's PerformanceObserver never emits resource entries, so
+  // onEnd only fires after the maxWaitForResourceTimingsMillis timeout -- held at 0 in these tests
+  // (see beforeEach) to keep them fast. The error/timeout/abort paths bypass the observer and
+  // remain synchronous.
+  it("should capture matching request headers as span attributes", async () => {
     vars.headersToCapture = [/x-test-header/];
     instrumentXhr();
 
@@ -175,6 +184,7 @@ describe("xhr test", () => {
     xhr.respond(200);
 
     const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
     const span = sendSpanMock.mock.calls[0]![0] as Span;
     expect(span.attributes).toContainEqual({
       key: "http.request.header.x-test-header",
@@ -182,8 +192,7 @@ describe("xhr test", () => {
     });
   });
 
-  // unskipped in the completion commit (Task 4)
-  it.skip("normalizes well-known methods to uppercase and records HTTP_METHOD_OTHER for unknown methods", () => {
+  it("normalizes well-known methods to uppercase and records HTTP_METHOD_OTHER for unknown methods", async () => {
     instrumentXhr();
 
     const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
@@ -192,13 +201,13 @@ describe("xhr test", () => {
     xhr.respond(200);
 
     const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
     const span = sendSpanMock.mock.calls[0]![0] as Span;
     expect(span.name).toBe("HTTP GET");
     expect(span.attributes).toContainEqual({ key: "http.request.method", value: { stringValue: "GET" } });
   });
 
-  // unskipped in the completion commit (Task 4)
-  it.skip("is safe to call instrumentXhr() twice (double-instrumentation guard)", () => {
+  it("is safe to call instrumentXhr() twice (double-instrumentation guard)", async () => {
     instrumentXhr();
     instrumentXhr();
 
@@ -208,6 +217,139 @@ describe("xhr test", () => {
     xhr.respond(200);
 
     const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
     expect(sendSpanMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the span with status UNSET and captures response headers on a successful response", async () => {
+    vars.headersToCapture = [/x-response-header/];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200, { "x-response-header": "yes", "content-type": "text/plain" });
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(0);
+    expect(span.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "200" },
+    });
+    expect(span.attributes).toContainEqual({
+      key: "http.response.header.x-response-header",
+      value: { stringValue: "yes" },
+    });
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.response.header.content-type" }));
+  });
+
+  it("marks the span as errored (status code ERROR) for a 4xx/5xx response", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(500);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(2);
+    expect(span.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "500" },
+    });
+  });
+
+  it("records an exception and marks the span as errored on a network error", () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.triggerError();
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(2);
+    expect(span.events.some((e) => e.name === "exception")).toBe(true);
+    expect(span.attributes).toContainEqual({ key: "error.type", value: { stringValue: "error" } });
+  });
+
+  it("records an exception and marks the span as errored on a timeout", () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.triggerTimeout();
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(2);
+    expect(span.events.some((e) => e.name === "exception")).toBe(true);
+    expect(span.attributes).toContainEqual({ key: "error.type", value: { stringValue: "timeout" } });
+  });
+
+  it("marks the span as cancelled (not failed) on abort", () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.triggerAbort();
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(0);
+    expect(span.attributes).toContainEqual({
+      key: "dash0.web.request.cancelled",
+      value: { boolValue: true },
+    });
+    expect(span.events.find((e) => e.name === "exception")).toBeUndefined();
+  });
+
+  it("only completes a span once even if multiple terminal events fire", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200);
+    // Simulate a spurious extra loadend (some browsers/polyfills have done this historically)
+    xhr.dispatchEvent(new Event("loadend"));
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a reused XHR instance's second open() as a fresh request with its own span", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/first");
+    xhr.send();
+    xhr.respond(200);
+
+    xhr.open("GET", "/api/second");
+    xhr.send();
+    xhr.respond(201);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
+    expect(sendSpanMock).toHaveBeenCalledTimes(2);
+    const firstSpan = sendSpanMock.mock.calls[0]![0] as Span;
+    const secondSpan = sendSpanMock.mock.calls[1]![0] as Span;
+    expect(firstSpan.spanId).not.toBe(secondSpan.spanId);
+    expect(secondSpan.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "201" },
+    });
   });
 });

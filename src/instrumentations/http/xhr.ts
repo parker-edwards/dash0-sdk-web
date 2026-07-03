@@ -1,15 +1,23 @@
 import { debug, observeResourcePerformance, parseUrl, win, wrap } from "../../utils";
 import { isUrlIgnored } from "../../utils/ignore-rules";
-import { addAttribute, endSpan, InProgressSpan, startSpan } from "../../utils/otel";
-import { HTTP_REQUEST_METHOD, HTTP_REQUEST_METHOD_ORIGINAL } from "../../semantic-conventions";
+import { addAttribute, endSpan, InProgressSpan, recordException, setSpanStatus, startSpan } from "../../utils/otel";
+import {
+  ERROR_TYPE,
+  HTTP_REQUEST_METHOD,
+  HTTP_REQUEST_METHOD_ORIGINAL,
+  HTTP_RESPONSE_STATUS_CODE,
+  SPAN_STATUS_ERROR,
+  SPAN_STATUS_UNSET,
+} from "../../semantic-conventions";
 import { vars, PropagatorType } from "../../vars";
-import { httpRequestHeaderKey } from "../../utils/otel/http";
+import { httpRequestHeaderKey, httpResponseHeaderKey } from "../../utils/otel/http";
 import { sendSpan } from "../../transport";
 import {
   addResourceNetworkEvents,
   addResourceSize,
   addTraceContextHttpHeaders,
   determinePropagatorTypes,
+  endSpanOnAbort,
   HTTP_METHOD_OTHER,
   isWellKnownHttpMethod,
 } from "./utils";
@@ -138,8 +146,86 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
     state.performanceObserver = performanceObserver;
     performanceObserver.start();
 
-    // Completion handling is added in Task 4.
+    this.addEventListener("error", () => {
+      state.failureKind = "error";
+    });
+    this.addEventListener("timeout", () => {
+      state.failureKind = "timeout";
+    });
+    this.addEventListener("abort", () => {
+      state.failureKind = "abort";
+    });
+    this.addEventListener("loadend", () => onLoadEnd(this, state));
 
     return original.call(this, body as any);
   };
+}
+
+function onLoadEnd(xhr: InstrumentedXhr, state: XhrState) {
+  if (state.completed) return;
+  state.completed = true;
+
+  const span = state.span;
+  if (!span) return;
+
+  const performanceObserver = state.performanceObserver;
+
+  if (state.failureKind === "abort") {
+    performanceObserver?.cancel();
+    endSpanOnAbort(span);
+    return;
+  }
+
+  let status = 0;
+  try {
+    status = xhr.status;
+  } catch (_e) {
+    // Reading .status can throw in some environments if accessed at the wrong readyState.
+    status = 0;
+  }
+
+  if (state.failureKind === "error" || state.failureKind === "timeout" || status === 0) {
+    performanceObserver?.cancel();
+    const failureKind = state.failureKind ?? "error";
+    recordException(span, { name: failureKind, message: `XMLHttpRequest failed: ${state.url}` });
+    addAttribute(span.attributes, ERROR_TYPE, failureKind);
+    sendSpan(endSpan(span, { code: SPAN_STATUS_ERROR, message: `XMLHttpRequest failed: ${state.url}` }, undefined));
+    return;
+  }
+
+  setSpanStatus(span, status >= 200 && status < 400 ? SPAN_STATUS_UNSET : SPAN_STATUS_ERROR);
+  addAttribute(span.attributes, HTTP_RESPONSE_STATUS_CODE, String(status));
+  tryCaptureResponseHeaders(xhr, span);
+
+  if (!performanceObserver) {
+    sendSpan(endSpan(span, undefined, undefined));
+    return;
+  }
+  performanceObserver.end();
+}
+
+function tryCaptureResponseHeaders(xhr: XMLHttpRequest, span: InProgressSpan) {
+  try {
+    if (!vars.headersToCapture.length) return;
+
+    const raw = xhr.getAllResponseHeaders();
+    if (!raw) return;
+
+    raw
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0)
+      .forEach((line) => {
+        const separatorIndex = line.indexOf(":");
+        if (separatorIndex === -1) return;
+
+        const name = line.substring(0, separatorIndex).trim();
+        const value = line.substring(separatorIndex + 1).trim();
+
+        if (vars.headersToCapture.some((rxp) => rxp.test(name))) {
+          addAttribute(span.attributes, httpResponseHeaderKey(name), value);
+        }
+      });
+  } catch (_e) {
+    debug("unable to capture http response headers due to CORS policy");
+  }
 }
