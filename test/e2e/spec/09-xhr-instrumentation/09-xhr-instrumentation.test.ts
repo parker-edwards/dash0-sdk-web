@@ -65,6 +65,10 @@ describe("XHR Instrumentation", () => {
     await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
     await expect(browser).toHaveTitle("xhr instrumentation test");
 
+    await browser.execute(async () => {
+      await fetch("http://localhost.lambdatest.com:8012/ajax-requests", { method: "DELETE" }).catch(() => {});
+    });
+
     const btn = await $("#xray-xhr-btn");
     await btn.click();
 
@@ -78,6 +82,20 @@ describe("XHR Instrumentation", () => {
         })
       );
     });
+
+    const ajaxResponse = await fetch("http://localhost.lambdatest.com:8012/ajax-requests");
+    const ajaxRequests = await ajaxResponse.json();
+    const awsRequest = ajaxRequests.find((req: any) => req.url.startsWith("/aws"));
+
+    expect(awsRequest).toBeDefined();
+    expect(awsRequest.headers).toHaveProperty("x-amzn-trace-id");
+    expect(awsRequest.headers["x-amzn-trace-id"]).toMatch(
+      /^Root=1-[0-9a-f]{8}-[0-9a-f]{24};Parent=[0-9a-f]{16};Sampled=1$/
+    );
+    // Same-origin requests receive ALL configured propagator types, so traceparent must be present too.
+    expect(awsRequest.headers).toHaveProperty("traceparent");
+    expect(awsRequest.headers["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+
     expectNoBrowserErrors();
   });
 
