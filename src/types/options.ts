@@ -7,6 +7,7 @@ export type InstrumentationName =
   | "@dash0/web-vitals"
   | "@dash0/error"
   | "@dash0/fetch"
+  | "@dash0/xhr"
   | "@dash0/interactions";
 
 /**

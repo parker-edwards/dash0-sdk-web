@@ -30,6 +30,10 @@ vi.mock("../instrumentations/http/fetch", () => ({
   instrumentFetch: vi.fn(),
 }));
 
+vi.mock("../instrumentations/http/xhr", () => ({
+  instrumentXhr: vi.fn(),
+}));
+
 vi.mock("../instrumentations/navigation", () => ({
   startNavigationInstrumentation: vi.fn(),
 }));
@@ -49,6 +53,7 @@ vi.mock("../utils", async () => {
 
 import { startErrorInstrumentation } from "../instrumentations/errors";
 import { instrumentFetch } from "../instrumentations/http/fetch";
+import { instrumentXhr } from "../instrumentations/http/xhr";
 import { startNavigationInstrumentation } from "../instrumentations/navigation";
 import { startWebVitalsInstrumentation } from "../instrumentations/web-vitals";
 import { startInteractionInstrumentation } from "../instrumentations/interactions";
@@ -93,6 +98,7 @@ describe("init", () => {
       expect(startWebVitalsInstrumentation).toHaveBeenCalled();
       expect(startErrorInstrumentation).toHaveBeenCalled();
       expect(instrumentFetch).toHaveBeenCalled();
+      expect(instrumentXhr).toHaveBeenCalled();
     });
 
     const instrumentations: InstrumentationName[] = [
@@ -100,6 +106,7 @@ describe("init", () => {
       "@dash0/web-vitals",
       "@dash0/error",
       "@dash0/fetch",
+      "@dash0/xhr",
       "@dash0/interactions",
     ];
     const instrumentationMocks = {
@@ -107,6 +114,7 @@ describe("init", () => {
       "@dash0/web-vitals": startWebVitalsInstrumentation,
       "@dash0/error": startErrorInstrumentation,
       "@dash0/fetch": instrumentFetch,
+      "@dash0/xhr": instrumentXhr,
       "@dash0/interactions": startInteractionInstrumentation,
     };
 
