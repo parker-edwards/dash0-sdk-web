@@ -125,7 +125,8 @@ These can all be passed via the Dash0 Web SDK's `init` call.
 
 ### Backend Correlation
 
-The SDK supports trace context propagation to correlate frontend requests with backend services. You can configure
+The SDK supports trace context propagation to correlate frontend requests with backend services, for both `fetch`
+and `XMLHttpRequest` (including libraries built on XHR, such as axios's default browser adapter). You can configure
 different header types (`traceparent`, `X-Amzn-Trace-Id`) for different endpoints using the `propagators` configuration.
 
 > Misconfiguration of cross origin trace correlation can lead to request failures. Please make sure to carefully
@@ -243,7 +244,7 @@ The SDK enumerates the env vars above under every framework prefix the bundler e
   optional: `true`<br>
   default: `undefined`<br>
   List of instrumentations to enable. Defaults to `undefined`, enabling all instrumentations.
-  Supported values: `'@dash0/navigation' | '@dash0/web-vitals' | '@dash0/error' | '@dash0/fetch'`
+  Supported values: `'@dash0/navigation' | '@dash0/web-vitals' | '@dash0/error' | '@dash0/fetch' | '@dash0/xhr'`
   Please note that some dash0 features might not work as expected if instrumentations are disabled.
 
 - **Ignore URLs**<br>
