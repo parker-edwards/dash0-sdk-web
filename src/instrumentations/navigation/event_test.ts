@@ -84,6 +84,7 @@ describe("transmitManualPageViewEvent", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vars.pageViewInstrumentation = { trackVirtualPageViews: true, includeParts: [] };
   });
 
   it("emits type=VIRTUAL and no change_state key", () => {
