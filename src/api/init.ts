@@ -122,6 +122,7 @@ export function init(opts: InitOptions) {
   if (isInstrumentationEnabled("@dash0/fetch", opts)) {
     instrumentFetch();
   }
+  // Both gates must pass: the instrumentation-name allowlist and the opt-in settings flag.
   if (isInstrumentationEnabled("@dash0/interactions", opts) && vars.interactionInstrumentation.enabled) {
     startInteractionInstrumentation();
   }
