@@ -1,4 +1,12 @@
-import { debug, observeResourcePerformance, parseUrl, win, wrap } from "../../utils";
+import {
+  addEventListener,
+  debug,
+  observeResourcePerformance,
+  parseUrl,
+  removeEventListener,
+  win,
+  wrap,
+} from "../../utils";
 import { isUrlIgnored } from "../../utils/ignore-rules";
 import { addAttribute, endSpan, InProgressSpan, recordException, setSpanStatus, startSpan } from "../../utils/otel";
 import {
@@ -37,6 +45,7 @@ type XhrState = {
   completed: boolean;
   failureKind?: XhrFailureKind;
   performanceObserver?: ReturnType<typeof observeResourcePerformance>;
+  listeners?: Array<[string, () => unknown]>;
 };
 
 const XHR_STATE = Symbol("dash0XhrState");
@@ -94,7 +103,7 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
   return function (this: InstrumentedXhr, body?: Document | XMLHttpRequestBodyInit | null) {
     const state = this[XHR_STATE];
     if (!state || state.ignored) {
-      return original.call(this, body as any);
+      return original.call(this, body);
     }
 
     const span = startSpan(`HTTP ${state.method}`);
@@ -146,24 +155,47 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
     state.performanceObserver = performanceObserver;
     performanceObserver.start();
 
-    this.addEventListener("error", () => {
-      state.failureKind = "error";
-    });
-    this.addEventListener("timeout", () => {
-      state.failureKind = "timeout";
-    });
-    this.addEventListener("abort", () => {
-      state.failureKind = "abort";
-    });
-    this.addEventListener("loadend", () => onLoadEnd(this, state));
+    // Keep references to the per-request listeners so onLoadEnd can remove them again -- loadend
+    // fires for every request outcome, so cleanup there prevents listeners (and their state/span
+    // closures) from accumulating on reused XHR instances.
+    state.listeners = [
+      [
+        "error",
+        () => {
+          state.failureKind = "error";
+        },
+      ],
+      [
+        "timeout",
+        () => {
+          state.failureKind = "timeout";
+        },
+      ],
+      [
+        "abort",
+        () => {
+          state.failureKind = "abort";
+        },
+      ],
+      ["loadend", () => onLoadEnd(this, state)],
+    ];
+    for (const [eventType, listener] of state.listeners) {
+      addEventListener(this, eventType, listener);
+    }
 
-    return original.call(this, body as any);
+    return original.call(this, body);
   };
 }
 
 function onLoadEnd(xhr: InstrumentedXhr, state: XhrState) {
   if (state.completed) return;
   state.completed = true;
+
+  // The request cycle is over -- remove the per-request listeners so they don't pile up on reused
+  // XHR instances.
+  for (const [eventType, listener] of state.listeners ?? []) {
+    removeEventListener(xhr, eventType, listener);
+  }
 
   const span = state.span;
   if (!span) return;
@@ -185,6 +217,7 @@ function onLoadEnd(xhr: InstrumentedXhr, state: XhrState) {
   }
 
   if (state.failureKind === "error" || state.failureKind === "timeout" || status === 0) {
+    // diverges from endSpanOnError because we additionally set ERROR_TYPE
     performanceObserver?.cancel();
     const failureKind = state.failureKind ?? "error";
     recordException(span, { name: failureKind, message: `XMLHttpRequest failed: ${state.url}` });

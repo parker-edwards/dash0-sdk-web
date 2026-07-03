@@ -352,4 +352,31 @@ describe("xhr test", () => {
       value: { stringValue: "201" },
     });
   });
+
+  it("removes the per-request listeners once the request completes", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    const removeListenerSpy = vi.spyOn(xhr, "removeEventListener");
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+
+    expect(removeListenerSpy).toHaveBeenCalledTimes(4);
+    expect(removeListenerSpy.mock.calls.map((c) => c[0]).sort()).toEqual(["abort", "error", "loadend", "timeout"]);
+
+    // Spurious late events after completion must not affect the already-sent span...
+    xhr.dispatchEvent(new Event("error"));
+    xhr.dispatchEvent(new Event("loadend"));
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+
+    // ...and a subsequent request cycle on the same instance still produces exactly one more span.
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200);
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
+  });
 });
