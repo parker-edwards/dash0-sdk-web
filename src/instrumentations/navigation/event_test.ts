@@ -6,7 +6,7 @@ vi.mock("../../transport", () => ({
 }));
 
 import { sendLog } from "../../transport";
-import { transmitPageViewEvent } from "./event";
+import { transmitPageViewEvent, transmitManualPageViewEvent } from "./event";
 import { vars } from "../../vars";
 
 const sendLogMock = sendLog as unknown as ReturnType<typeof vi.fn>;
@@ -69,5 +69,85 @@ describe("transmitPageViewEvent", () => {
     expect(log.attributes).toEqual(expect.arrayContaining([{ key: "app.screen", value: { stringValue: "settings" } }]));
     const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
     expect(bodyValues).toEqual(expect.arrayContaining([{ key: "title", value: { stringValue: "Custom Title" } }]));
+  });
+});
+
+describe("transmitManualPageViewEvent", () => {
+  beforeEach(() => {
+    sendLogMock.mockClear();
+    vars.pageViewInstrumentation = {
+      trackVirtualPageViews: true,
+      includeParts: [],
+      generateMetadata: () => ({ title: "should not be used", attributes: { should_not_appear: true } }),
+    };
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("emits type=VIRTUAL and no change_state key", () => {
+    transmitManualPageViewEvent({ timeUnixNano: "1700000000000000000", title: "/settings" });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
+
+    expect(bodyValues).toEqual(
+      expect.arrayContaining([
+        { key: "type", value: { doubleValue: 1 } },
+        { key: "title", value: { stringValue: "/settings" } },
+      ])
+    );
+    expect(bodyValues.find((v) => v.key === "change_state")).toBeUndefined();
+  });
+
+  it("does not invoke vars.pageViewInstrumentation.generateMetadata", () => {
+    const generateMetadata = vi.fn().mockReturnValue({ title: "ignored" });
+    vars.pageViewInstrumentation = { trackVirtualPageViews: true, includeParts: [], generateMetadata };
+
+    transmitManualPageViewEvent({ timeUnixNano: "1700000000000000000", title: "/settings" });
+
+    expect(generateMetadata).not.toHaveBeenCalled();
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
+    expect(bodyValues).toEqual(expect.arrayContaining([{ key: "title", value: { stringValue: "/settings" } }]));
+  });
+
+  it("merges custom attributes into signal attributes", () => {
+    transmitManualPageViewEvent({
+      timeUnixNano: "1700000000000000000",
+      title: "/settings",
+      attributes: { "app.screen": "settings", "app.tab_index": 2 },
+    });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    expect(log.attributes).toEqual(
+      expect.arrayContaining([
+        { key: "app.screen", value: { stringValue: "settings" } },
+        { key: "app.tab_index", value: { doubleValue: 2 } },
+      ])
+    );
+  });
+
+  it("passes url through to page.url.* attributes when provided", () => {
+    transmitManualPageViewEvent({
+      timeUnixNano: "1700000000000000000",
+      title: "/settings",
+      url: new URL("https://example.com/settings"),
+    });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    expect(log.attributes).toEqual(
+      expect.arrayContaining([{ key: "page.url.path", value: { stringValue: "/settings" } }])
+    );
+  });
+
+  it("includes referrer the same way the auto path does", () => {
+    transmitManualPageViewEvent({ timeUnixNano: "1700000000000000000", title: "/settings" });
+
+    const log = sendLogMock.mock.calls[0]![0] as LogRecord;
+    const bodyValues = log.body?.kvlistValue?.values as KeyValue[];
+    // doc.referrer is empty string in jsdom by default, so "referrer" key should be absent
+    expect(bodyValues.find((v) => v.key === "referrer")).toBeUndefined();
   });
 });
