@@ -1,6 +1,6 @@
 # Dash0 Web SDK
 
-> [!NOTE] > **About this fork:** This is a personal fork of [`dash0hq/dash0-sdk-web`](https://github.com/dash0hq/dash0-sdk-web),
+> **About this fork:** This is a personal fork of [`dash0hq/dash0-sdk-web`](https://github.com/dash0hq/dash0-sdk-web),
 > maintained by [@parker-edwards](https://github.com/parker-edwards) in a personal capacity. It contains preview
 > features that are **not part of the official Dash0 Web SDK**: a side-effect-free manual page-view API (`startView`),
 > `XMLHttpRequest` instrumentation with trace-context propagation, and opt-in automatic click instrumentation.
