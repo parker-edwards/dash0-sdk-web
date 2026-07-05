@@ -1,5 +1,13 @@
 # Dash0 Web SDK
 
+> [!NOTE] > **About this fork:** This is a personal fork of [`dash0hq/dash0-sdk-web`](https://github.com/dash0hq/dash0-sdk-web),
+> maintained by [@parker-edwards](https://github.com/parker-edwards) in a personal capacity. It contains preview
+> features that are **not part of the official Dash0 Web SDK**: a side-effect-free manual page-view API (`startView`),
+> `XMLHttpRequest` instrumentation with trace-context propagation, and opt-in automatic click instrumentation.
+> These may be proposed upstream in the future, but there is no committed timeline, and nothing in this repository
+> is endorsed or supported by Dash0. For production use, prefer the official
+> [`@dash0/sdk-web`](https://www.npmjs.com/package/@dash0/sdk-web) package.
+
 This SDK enables users of Dash0's web monitoring features to instrument a website or single-page-application to capture
 and transmit telemetry to Dash0.
 
