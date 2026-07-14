@@ -21,6 +21,7 @@ import { vars, PropagatorType } from "../../vars";
 import { httpRequestHeaderKey, httpResponseHeaderKey } from "../../utils/otel/http";
 import { sendSpan } from "../../transport";
 import {
+  addInteractionAttributes,
   addResourceNetworkEvents,
   addResourceSize,
   addTraceContextHttpHeaders,
@@ -113,6 +114,7 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
     if (!state.isWellKnownMethod) {
       addAttribute(span.attributes, HTTP_REQUEST_METHOD_ORIGINAL, state.originalMethod);
     }
+    addInteractionAttributes(span);
     state.span = span;
 
     if (state.propagatorTypes.length > 0) {
