@@ -6,6 +6,9 @@ describe("vars defaults", () => {
     expect(vars.interactionInstrumentation).toEqual({
       enabled: false,
       actionNameAttribute: "data-dash0-action-name",
+      captureScrolls: false,
+      captureKeyPresses: false,
+      captureChanges: false,
     });
   });
 });
