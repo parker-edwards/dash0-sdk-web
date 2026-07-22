@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { vars } from "../../vars";
 import { instrumentXhr } from "./xhr";
+import { doc } from "../../utils/globals";
 import { sendSpan } from "../../transport";
 import type { Span } from "../../types/otlp";
 
@@ -165,6 +166,44 @@ describe("xhr test", () => {
 
     expect(xhr.requestHeaders["traceparent"]).toBeUndefined();
     expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  // Ignore rules must match against the resolved absolute URL -- the same form the fetch
+  // instrumentation matches against -- so origin-anchored regexes apply uniformly to relative
+  // XHR URLs.
+  it("should apply origin-anchored ignore regexes to relative URLs", () => {
+    const origin = new URL(doc!.baseURI).origin;
+    vars.ignoreUrls = [new RegExp(`^${origin}/you-cant-see-this`)];
+    vars.propagators = [{ type: "traceparent", match: [] }];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/you-cant-see-this");
+    xhr.send();
+
+    expect(xhr.requestHeaders["traceparent"]).toBeUndefined();
+    expect(sendSpan).not.toHaveBeenCalled();
+    // The page's own request must still have gone through with the original relative URL.
+    expect(xhr.url).toBe("/you-cant-see-this");
+  });
+
+  it("records the resolved absolute URL as url.full for relative request URLs", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.attributes).toContainEqual({
+      key: "url.full",
+      value: { stringValue: new URL("/api/test", doc!.baseURI).href },
+    });
+    // The native open() must still have received the page's original relative URL.
+    expect(xhr.url).toBe("/api/test");
   });
 
   // The tests below that drive a request to *successful* completion must await sendSpan

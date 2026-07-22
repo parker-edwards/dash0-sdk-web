@@ -83,6 +83,10 @@ function wrapOpen(original: XMLHttpRequest["open"]): XMLHttpRequest["open"] {
 
 function onOpen(xhr: InstrumentedXhr, method: string, url: string | URL): string {
   const stringUrl = String(url);
+  // Resolve relative URLs so ignore rules, propagator matching and url.* attributes see the same
+  // absolute URL the fetch instrumentation matches against (Request resolves it there). Only the
+  // SDK bookkeeping uses the resolved form -- the native open() still receives stringUrl.
+  const resolvedUrl = parseUrl(stringUrl).href;
   const originalMethod = String(method ?? "GET");
   const isWellKnownMethodMatchingLeniently = isWellKnownHttpMethod(originalMethod.toUpperCase());
   const normalizedMethod = isWellKnownMethodMatchingLeniently ? originalMethod.toUpperCase() : HTTP_METHOD_OTHER;
@@ -94,9 +98,9 @@ function onOpen(xhr: InstrumentedXhr, method: string, url: string | URL): string
     method: normalizedMethod,
     originalMethod,
     isWellKnownMethod: isWellKnownHttpMethod(originalMethod),
-    url: stringUrl,
-    ignored: isUrlIgnored(stringUrl),
-    propagatorTypes: determinePropagatorTypes(stringUrl),
+    url: resolvedUrl,
+    ignored: isUrlIgnored(resolvedUrl),
+    propagatorTypes: determinePropagatorTypes(resolvedUrl),
     completed: false,
   };
 
@@ -126,6 +130,9 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
   return function (this: InstrumentedXhr, body?: Document | XMLHttpRequestBodyInit | null) {
     const state = this[XHR_STATE];
     if (!state || state.ignored) {
+      if (state?.ignored) {
+        debug(`Not creating span for XMLHttpRequest because the url is ignored, URL: ${state.url}`);
+      }
       return original.call(this, body);
     }
 
@@ -169,8 +176,7 @@ function onSend(xhr: InstrumentedXhr, state: XhrState) {
   }
 
   const performanceObserver = observeResourcePerformance({
-    resourceMatcher: ({ initiatorType, name }) =>
-      initiatorType === "xmlhttprequest" && name === parseUrl(state.url).href,
+    resourceMatcher: ({ initiatorType, name }) => initiatorType === "xmlhttprequest" && name === state.url,
     maxWaitForResourceMillis: vars.maxWaitForResourceTimingsMillis,
     maxToleranceForResourceTimingsMillis: vars.maxToleranceForResourceTimingsMillis,
     onEnd: ({ duration, resource }) => {
