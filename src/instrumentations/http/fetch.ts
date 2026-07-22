@@ -32,83 +32,53 @@ export function instrumentFetch() {
   wrap(win, "fetch", wrapFetch);
 }
 
+type FetchInstrumentation = {
+  copyOfInit?: RequestInit;
+  span: InProgressSpan;
+  performanceObserver: ReturnType<typeof observeResourcePerformance>;
+};
+
 // eslint-disable-next-line no-restricted-globals -- only used as type here
 function wrapFetch(original: typeof fetch) {
   return async function fetchWithInstrumentation(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    let copyOfInit = init ? Object.assign({}, init) : init;
-
-    let body: BodyInit | null = null;
-    if (copyOfInit?.body) {
-      body = copyOfInit.body;
-      copyOfInit.body = undefined;
-    }
-
-    const request = new Request(input, copyOfInit);
-    if (body && copyOfInit) {
-      copyOfInit.body = body;
-    }
-
-    const url = request.url;
-    if (isUrlIgnored(url)) {
-      debug(`Not creating span for fetch call because the url is ignored, URL: ${url}`);
-      return original(input instanceof Request ? request : input, init);
-    }
-
-    // https://fetch.spec.whatwg.org/#concept-request-method
-    // We'll match methods case insensitive here to make the user experience a bit less painful
-    const originalMethod = request.method ?? "GET";
-    const isWellKnownMethod = isWellKnownHttpMethod(originalMethod);
-    const isWellKnownMethodMatchingLeniently = isWellKnownHttpMethod(originalMethod.toUpperCase());
-    const method = isWellKnownMethodMatchingLeniently ? originalMethod.toUpperCase() : HTTP_METHOD_OTHER;
-
-    const span = startSpan(`HTTP ${method}`);
-    addCommonAttributes(span.attributes);
-    addUrlAttributes(span.attributes, url);
-    addGraphQlProperties(input, init, span);
-    addAttribute(span.attributes, HTTP_REQUEST_METHOD, method);
-    if (!isWellKnownMethod) {
-      addAttribute(span.attributes, HTTP_REQUEST_METHOD_ORIGINAL, originalMethod);
-    }
-
-    const propagatorTypes = determinePropagatorTypes(url);
-    const shouldSetCorrelationHeaders = propagatorTypes.length > 0;
-    if (shouldSetCorrelationHeaders) {
-      if (copyOfInit?.headers) {
-        // ensure we have a unified container for the headers
-        copyOfInit.headers = new Headers(copyOfInit.headers);
-        addTraceContextHttpHeaders(copyOfInit.headers.append, copyOfInit.headers, span, propagatorTypes);
-      } else if (input instanceof Request) {
-        addTraceContextHttpHeaders(request.headers.append, request.headers, span, propagatorTypes);
-      } else {
-        if (!copyOfInit) {
-          copyOfInit = {};
-        }
-        copyOfInit.headers = new Headers();
-        addTraceContextHttpHeaders(copyOfInit.headers.append, copyOfInit.headers, span, propagatorTypes);
-      }
-    }
-
-    tryCaptureHttpHeaders(request.headers, span, (k) => httpRequestHeaderKey(k));
-
-    const performanceObserver = observeResourcePerformance({
-      // We match on both fetch and XHR here to support polyfills
-      resourceMatcher: ({ initiatorType, name }) =>
-        (initiatorType === "fetch" || initiatorType === "xmlhttprequest") && name === parseUrl(url).href,
-      maxWaitForResourceMillis: vars.maxWaitForResourceTimingsMillis,
-      maxToleranceForResourceTimingsMillis: vars.maxToleranceForResourceTimingsMillis,
-      onEnd: ({ duration, resource }) => {
-        if (resource) {
-          addResourceNetworkEvents(span, resource);
-          addResourceSize(span, resource);
-        }
-        // duration is millis we need to convert to nanos
-        sendSpan(endSpan(span, undefined, duration * 1000000));
-      },
-    });
-
-    performanceObserver.start();
+    let fetchInput: RequestInfo | URL = input;
+    let request: Request | undefined;
+    let instrumentation: FetchInstrumentation | undefined;
     try {
-      const origResponse = await original(input instanceof Request ? request : input, copyOfInit);
+      let copyOfInit = init ? Object.assign({}, init) : init;
+
+      let body: BodyInit | null = null;
+      if (copyOfInit?.body) {
+        body = copyOfInit.body;
+        copyOfInit.body = undefined;
+      }
+
+      request = new Request(input, copyOfInit);
+      if (body && copyOfInit) {
+        copyOfInit.body = body;
+      }
+      // Constructing the Request above disturbs the body of a Request input, so from here on the
+      // copy has to be handed to the original fetch in place of the input -- including on the
+      // ignored and instrumentation-failure paths below.
+      fetchInput = input instanceof Request ? request : input;
+
+      if (isUrlIgnored(request.url)) {
+        debug(`Not creating span for fetch call because the url is ignored, URL: ${request.url}`);
+        // Note: the rejection of the returned promise does not route through the catch below --
+        // only synchronous throws do, so the original fetch cannot be invoked twice.
+        return original(fetchInput, init);
+      }
+
+      instrumentation = onFetchStart(input, init, request, copyOfInit);
+    } catch (e) {
+      debug("failed to instrument fetch call", e);
+      return original(fetchInput, init);
+    }
+
+    const { copyOfInit, span, performanceObserver } = instrumentation;
+
+    try {
+      const origResponse = await original(fetchInput, copyOfInit);
       addResponseData(span, origResponse);
 
       return wrapResponse(
@@ -117,7 +87,7 @@ function wrapFetch(original: typeof fetch) {
         () => performanceObserver.end(),
         (e) => {
           performanceObserver.cancel();
-          if (request.signal?.aborted) {
+          if (request?.signal?.aborted) {
             endSpanOnAbort(span);
           } else {
             endSpanOnError(span, e);
@@ -126,7 +96,7 @@ function wrapFetch(original: typeof fetch) {
       );
     } catch (e) {
       performanceObserver.cancel();
-      if (request.signal?.aborted) {
+      if (request?.signal?.aborted) {
         endSpanOnAbort(span);
       } else {
         endSpanOnError(span, e as Exception);
@@ -134,6 +104,71 @@ function wrapFetch(original: typeof fetch) {
       throw e;
     }
   };
+}
+
+function onFetchStart(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  request: Request,
+  copyOfInit: RequestInit | undefined
+): FetchInstrumentation {
+  const url = request.url;
+
+  // https://fetch.spec.whatwg.org/#concept-request-method
+  // We'll match methods case insensitive here to make the user experience a bit less painful
+  const originalMethod = request.method ?? "GET";
+  const isWellKnownMethod = isWellKnownHttpMethod(originalMethod);
+  const isWellKnownMethodMatchingLeniently = isWellKnownHttpMethod(originalMethod.toUpperCase());
+  const method = isWellKnownMethodMatchingLeniently ? originalMethod.toUpperCase() : HTTP_METHOD_OTHER;
+
+  const span = startSpan(`HTTP ${method}`);
+  addCommonAttributes(span.attributes);
+  addUrlAttributes(span.attributes, url);
+  addGraphQlProperties(input, init, span);
+  addAttribute(span.attributes, HTTP_REQUEST_METHOD, method);
+  if (!isWellKnownMethod) {
+    addAttribute(span.attributes, HTTP_REQUEST_METHOD_ORIGINAL, originalMethod);
+  }
+
+  const propagatorTypes = determinePropagatorTypes(url);
+  const shouldSetCorrelationHeaders = propagatorTypes.length > 0;
+  if (shouldSetCorrelationHeaders) {
+    if (copyOfInit?.headers) {
+      // ensure we have a unified container for the headers
+      copyOfInit.headers = new Headers(copyOfInit.headers);
+      addTraceContextHttpHeaders(copyOfInit.headers.append, copyOfInit.headers, span, propagatorTypes);
+    } else if (input instanceof Request) {
+      addTraceContextHttpHeaders(request.headers.append, request.headers, span, propagatorTypes);
+    } else {
+      if (!copyOfInit) {
+        copyOfInit = {};
+      }
+      copyOfInit.headers = new Headers();
+      addTraceContextHttpHeaders(copyOfInit.headers.append, copyOfInit.headers, span, propagatorTypes);
+    }
+  }
+
+  tryCaptureHttpHeaders(request.headers, span, (k) => httpRequestHeaderKey(k));
+
+  const performanceObserver = observeResourcePerformance({
+    // We match on both fetch and XHR here to support polyfills
+    resourceMatcher: ({ initiatorType, name }) =>
+      (initiatorType === "fetch" || initiatorType === "xmlhttprequest") && name === parseUrl(url).href,
+    maxWaitForResourceMillis: vars.maxWaitForResourceTimingsMillis,
+    maxToleranceForResourceTimingsMillis: vars.maxToleranceForResourceTimingsMillis,
+    onEnd: ({ duration, resource }) => {
+      if (resource) {
+        addResourceNetworkEvents(span, resource);
+        addResourceSize(span, resource);
+      }
+      // duration is millis we need to convert to nanos
+      sendSpan(endSpan(span, undefined, duration * 1000000));
+    },
+  });
+
+  performanceObserver.start();
+
+  return { copyOfInit, span, performanceObserver };
 }
 
 // @ts-expect-error -- WIP

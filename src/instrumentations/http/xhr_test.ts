@@ -379,4 +379,107 @@ describe("xhr test", () => {
     xhr.respond(200);
     await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
   });
+
+  // The tests below verify that SDK-internal errors never escape into the page's synchronous
+  // open()/send() calls -- a misconfigured SDK must degrade to "no telemetry", never to a
+  // page-wide XHR outage.
+
+  it("does not break the page's XHR when ignoreUrls contains plain strings instead of RegExps", () => {
+    vars.ignoreUrls = ["/health"] as unknown as RegExp[];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    expect(() => {
+      xhr.open("GET", "/health");
+      xhr.send("payload");
+    }).not.toThrow();
+
+    // The native methods must still have run...
+    expect(xhr.url).toBe("/health");
+    expect(xhr.sentBody).toBe("payload");
+    // ...while the request goes untracked.
+    xhr.respond(200);
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("does not break the page's XHR when a propagator match contains plain strings instead of RegExps", () => {
+    vars.propagators = [{ type: "traceparent", match: ["http://foo.bar/"] as unknown as RegExp[] }];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    expect(() => {
+      xhr.open("GET", "http://foo.bar/foo");
+      xhr.send();
+    }).not.toThrow();
+
+    expect(xhr.url).toBe("http://foo.bar/foo");
+    xhr.respond(200);
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("does not break the page's send() when a header capture matcher throws", () => {
+    vars.headersToCapture = [
+      {
+        test: () => {
+          throw new Error("boom");
+        },
+      } as unknown as RegExp,
+    ];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("x-test-header", "hello");
+    expect(() => xhr.send("payload")).not.toThrow();
+
+    expect(xhr.sentBody).toBe("payload");
+    xhr.respond(200);
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("accepts a non-string method just like native XHR does", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    expect(() => {
+      xhr.open(123 as unknown as string, "/api/test");
+      xhr.send();
+    }).not.toThrow();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.name).toBe("HTTP _OTHER");
+    expect(span.attributes).toContainEqual({ key: "http.request.method_original", value: { stringValue: "123" } });
+  });
+
+  it("evaluates a custom URL object's toString only once across SDK and native open()", () => {
+    instrumentXhr();
+
+    const toString = vi.fn(() => "/api/test");
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", { toString } as unknown as string);
+
+    expect(toString).toHaveBeenCalledTimes(1);
+    expect(xhr.url).toBe("/api/test");
+  });
+
+  it("does not throw out of init when the page locked the XMLHttpRequest prototype", () => {
+    class LockedXhr extends EventTarget {
+      open() {}
+      setRequestHeader() {}
+      send() {}
+    }
+    for (const method of ["open", "setRequestHeader", "send"] as const) {
+      Object.defineProperty(LockedXhr.prototype, method, {
+        value: LockedXhr.prototype[method],
+        writable: false,
+        configurable: false,
+      });
+    }
+    vi.stubGlobal("XMLHttpRequest", LockedXhr);
+
+    expect(() => instrumentXhr()).not.toThrow();
+  });
 });

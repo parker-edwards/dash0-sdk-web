@@ -27,6 +27,7 @@ describe("fetch test", () => {
   afterEach(() => {
     vi.resetAllMocks();
     vars.propagators = undefined;
+    vars.ignoreUrls = [];
   });
 
   it("should inject traceparent header for cross-origin requests", async () => {
@@ -193,6 +194,34 @@ describe("fetch test", () => {
     const fetchHeaders = (fetchMock.mock.calls[0]!.at(1)! as { headers: Headers }).headers;
     expect(fetchHeaders.get("traceparent")).not.toBeNull();
     expect(fetchHeaders.get("X-Amzn-Trace-Id")).toBeNull();
+  });
+
+  // SDK-internal errors (e.g. config typos) must degrade to an uninstrumented fetch call, never
+  // to a rejected promise the page did not cause.
+
+  it("falls back to an uninstrumented fetch when ignoreUrls contains plain strings instead of RegExps", async () => {
+    vars.ignoreUrls = ["/health"] as unknown as RegExp[];
+    instrumentFetch();
+
+    // eslint-disable-next-line no-restricted-globals
+    await expect(fetch("http://localhost:3000/health")).resolves.toBeDefined();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/health");
+    expect(fetchMock.mock.calls[0]![1]).toBeUndefined();
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("falls back to an uninstrumented fetch when a propagator match contains plain strings instead of RegExps", async () => {
+    vars.propagators = [{ type: "traceparent", match: ["http://foo.bar/"] as unknown as RegExp[] }];
+    instrumentFetch();
+
+    // eslint-disable-next-line no-restricted-globals
+    await expect(fetch("http://foo.bar/foo")).resolves.toBeDefined();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]![1]).toBeUndefined();
+    expect(sendSpan).not.toHaveBeenCalled();
   });
 
   describe("aborted requests", () => {
