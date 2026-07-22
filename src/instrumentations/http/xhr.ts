@@ -82,6 +82,16 @@ function wrapOpen(original: XMLHttpRequest["open"]): XMLHttpRequest["open"] {
 }
 
 function onOpen(xhr: InstrumentedXhr, method: string, url: string | URL): string {
+  // Per spec, open() during an in-flight request terminates the fetch without firing
+  // abort/loadend, so onLoadEnd never runs for the previous request. Clean it up here (before
+  // anything below can throw) or its listeners, performance observer and span would leak on
+  // every cancel-by-reopen cycle -- and its stale loadend listener would end the old span with
+  // the next request's status.
+  const previousState = xhr[XHR_STATE];
+  if (previousState?.span && !previousState.completed) {
+    cleanupAbandonedRequest(xhr, previousState);
+  }
+
   const stringUrl = String(url);
   // Resolve relative URLs so ignore rules, propagator matching and url.* attributes see the same
   // absolute URL the fetch instrumentation matches against (Request resolves it there). Only the
@@ -92,7 +102,7 @@ function onOpen(xhr: InstrumentedXhr, method: string, url: string | URL): string
   const normalizedMethod = isWellKnownMethodMatchingLeniently ? originalMethod.toUpperCase() : HTTP_METHOD_OTHER;
 
   // A new open() call on a reused XHR instance resets state -- any prior span for this instance
-  // has already been sent (or will never be, if the previous request never completed) and this
+  // has already been sent (completed requests) or was just ended as cancelled above, and this
   // open() is treated as the start of a brand-new request with its own span.
   xhr[XHR_STATE] = {
     method: normalizedMethod,
@@ -133,6 +143,13 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
       if (state?.ignored) {
         debug(`Not creating span for XMLHttpRequest because the url is ignored, URL: ${state.url}`);
       }
+      return original.call(this, body);
+    }
+
+    // send() on an already-sent request throws InvalidStateError natively. Don't create a second
+    // span and set of listeners for it -- that would overwrite the in-flight request's state and
+    // attribute its response to the wrong span.
+    if (state.span && !state.completed) {
       return original.call(this, body);
     }
 
@@ -216,6 +233,23 @@ function onSend(xhr: InstrumentedXhr, state: XhrState) {
   ];
   for (const [eventType, listener] of state.listeners) {
     addEventListener(xhr, eventType, listener);
+  }
+}
+
+function cleanupAbandonedRequest(xhr: InstrumentedXhr, state: XhrState) {
+  // Mark completed first so a stray late event stays a no-op even if listener removal fails.
+  state.completed = true;
+  try {
+    for (const [eventType, listener] of state.listeners ?? []) {
+      removeEventListener(xhr, eventType, listener);
+    }
+    state.performanceObserver?.cancel();
+    if (state.span) {
+      // Report the request as cancelled, matching how fetch reports aborted requests.
+      endSpanOnAbort(state.span);
+    }
+  } catch (_e) {
+    // Best-effort cleanup only -- never let it throw into the page's open() call.
   }
 }
 

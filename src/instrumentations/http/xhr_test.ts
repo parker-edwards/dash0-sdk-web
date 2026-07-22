@@ -401,6 +401,71 @@ describe("xhr test", () => {
     });
   });
 
+  it("ends the previous span as cancelled when open() is called while a request is in flight", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/first");
+    xhr.send();
+    // Reopen before the first request completes -- per spec this terminates the in-flight fetch
+    // without firing abort/loadend.
+    xhr.open("GET", "/api/second");
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const firstSpan = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(firstSpan.attributes).toContainEqual({
+      key: "url.full",
+      value: { stringValue: "http://localhost:3000/api/first" },
+    });
+    expect(firstSpan.attributes).toContainEqual({
+      key: "dash0.web.request.cancelled",
+      value: { boolValue: true },
+    });
+    expect(firstSpan.attributes.find((a) => a.key === "http.response.status_code")).toBeUndefined();
+
+    xhr.send();
+    xhr.respond(200);
+
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
+    // The second request's completion must end its own span -- the first request's stale loadend
+    // listener must not have re-ended the cancelled span with the new request's status.
+    const secondSpan = sendSpanMock.mock.calls[1]![0] as Span;
+    expect(secondSpan.spanId).not.toBe(firstSpan.spanId);
+    expect(secondSpan.attributes).toContainEqual({
+      key: "url.full",
+      value: { stringValue: "http://localhost:3000/api/second" },
+    });
+    expect(secondSpan.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "200" },
+    });
+    expect(sendSpanMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not create a second span when send() is called twice", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    const addListenerSpy = vi.spyOn(xhr, "addEventListener");
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    // A second send() on an in-flight request throws InvalidStateError natively; the SDK must not
+    // create a second span or attach a second set of listeners for it.
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    expect(addListenerSpy).toHaveBeenCalledTimes(4);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "200" },
+    });
+  });
+
   it("removes the per-request listeners once the request completes", async () => {
     instrumentXhr();
 
