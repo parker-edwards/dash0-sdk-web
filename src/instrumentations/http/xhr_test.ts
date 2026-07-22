@@ -245,6 +245,65 @@ describe("xhr test", () => {
     });
   });
 
+  it("does not retain headers set while headersToCapture is empty", async () => {
+    vars.headersToCapture = [];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("x-test-header", "hello");
+    // Nothing may have been stored above -- enabling capture afterwards must not resurface it.
+    vars.headersToCapture = [/x-test-header/];
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.x-test-header" }));
+  });
+
+  it("combines repeated setRequestHeader calls case-insensitively into a single attribute", async () => {
+    vars.headersToCapture = [/x-test-header/];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("X-Test-Header", "a");
+    xhr.setRequestHeader("x-test-header", "b");
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    const headerAttributes = span.attributes.filter((attr) => attr.key === "http.request.header.x-test-header");
+    expect(headerAttributes).toEqual([
+      {
+        key: "http.request.header.x-test-header",
+        value: { stringValue: "a, b" },
+      },
+    ]);
+  });
+
+  it("matches capture regexes against the lowercased header name, like fetch", async () => {
+    // Headers iteration yields lowercased names for fetch, so a case-sensitive regex written
+    // against the original casing never matches there -- XHR must behave the same.
+    vars.headersToCapture = [/^X-Test/];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("X-Test-Header", "hello");
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.x-test-header" }));
+  });
+
   it("normalizes well-known methods to uppercase and records HTTP_METHOD_OTHER for unknown methods", async () => {
     instrumentXhr();
 
@@ -608,7 +667,7 @@ describe("xhr test", () => {
     expect(sendSpan).not.toHaveBeenCalled();
   });
 
-  it("does not break the page's send() when a header capture matcher throws", () => {
+  it("does not break the page's XHR when a header capture matcher throws", async () => {
     vars.headersToCapture = [
       {
         test: () => {
@@ -620,12 +679,20 @@ describe("xhr test", () => {
 
     const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
     xhr.open("GET", "/api/test");
-    xhr.setRequestHeader("x-test-header", "hello");
+    // The matcher throws inside the wrapped setRequestHeader -- the page's call must succeed
+    // and the header must still reach the request.
+    expect(() => xhr.setRequestHeader("x-test-header", "hello")).not.toThrow();
     expect(() => xhr.send("payload")).not.toThrow();
 
+    expect(xhr.requestHeaders["x-test-header"]).toBe("hello");
     expect(xhr.sentBody).toBe("payload");
     xhr.respond(200);
-    expect(sendSpan).not.toHaveBeenCalled();
+
+    // The request is still tracked normally -- only the header capture is skipped.
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.x-test-header" }));
   });
 
   it("accepts a non-string method just like native XHR does", async () => {

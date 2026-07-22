@@ -515,6 +515,8 @@ The SDK auto-detects VCS (version control) context from the build environment an
   default: `undefined`<br>
   A set of regular expressions that will be matched against HTTP request headers,
   to be captured in `XMLHttpRequest` and `fetch` Instrumentations. These headers will be transferred as span attributes.
+  Matching is performed against the lowercased header name, so make sure your regular expressions match lowercase names
+  (e.g. `/^x-my-header$/` instead of `/^X-My-Header$/`).
 
 #### Page view instrumentation
 

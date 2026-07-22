@@ -141,7 +141,19 @@ function onSetRequestHeader(xhr: InstrumentedXhr, name: string, value: string) {
   const state = xhr[XHR_STATE];
   if (!state || state.ignored) return;
 
-  (state.capturedRequestHeaders ??= {})[name] = value;
+  // Filter at capture time like the fetch instrumentation -- never retain unmatched
+  // (potentially sensitive) headers on the page-reachable XHR instance.
+  if (vars.headersToCapture.length === 0) return;
+
+  // Match against the lowercased name so a regex behaves the same here as for fetch,
+  // where Headers iteration yields lowercased names.
+  const lowerName = name.toLowerCase();
+  if (!vars.headersToCapture.some((rxp) => rxp.test(lowerName))) return;
+
+  const headers = (state.capturedRequestHeaders ??= {});
+  // Native XHR combines repeated setRequestHeader() calls for the same name
+  // (case-insensitively) into a single "a, b" value -- mirror that.
+  headers[lowerName] = lowerName in headers ? `${headers[lowerName]}, ${value}` : value;
 }
 
 function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
@@ -227,11 +239,11 @@ function onSend(xhr: InstrumentedXhr, state: XhrState) {
     }
   }
 
-  if (vars.headersToCapture.length > 0 && state.capturedRequestHeaders) {
+  // Entries were already filtered against vars.headersToCapture (and lowercased) at
+  // setRequestHeader() time.
+  if (state.capturedRequestHeaders) {
     for (const [name, value] of Object.entries(state.capturedRequestHeaders)) {
-      if (vars.headersToCapture.some((rxp) => rxp.test(name))) {
-        addAttribute(span.attributes, httpRequestHeaderKey(name), value);
-      }
+      addAttribute(span.attributes, httpRequestHeaderKey(name), value);
     }
   }
 
