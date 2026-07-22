@@ -42,7 +42,10 @@ class FakeXMLHttpRequest extends EventTarget {
   }
 
   setRequestHeader(name: string, value: string) {
-    this.requestHeaders[name] = value;
+    // Per the XHR spec, repeated setRequestHeader() calls with the same name combine the values.
+    // Modeling this makes doubled header injection observable as a comma-joined value.
+    const existing = this.requestHeaders[name];
+    this.requestHeaders[name] = existing ? `${existing}, ${value}` : value;
   }
 
   send(body?: unknown) {
@@ -247,14 +250,20 @@ describe("xhr test", () => {
   });
 
   it("is safe to call instrumentXhr() twice (double-instrumentation guard)", async () => {
+    vars.propagators = [{ type: "traceparent", match: [] }];
     instrumentXhr();
     instrumentXhr();
 
     const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
     xhr.open("GET", "/api/test");
     xhr.send();
-    xhr.respond(200);
 
+    // Double-wrapping would inject traceparent twice, and the XHR spec combines repeated
+    // setRequestHeader() values -- the backend would receive one invalid comma-joined header.
+    // A single well-formed value proves injection ran exactly once.
+    expect(xhr.requestHeaders["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+
+    xhr.respond(200);
     const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
     await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
     expect(sendSpanMock).toHaveBeenCalledTimes(1);
