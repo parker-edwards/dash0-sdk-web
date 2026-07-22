@@ -8,7 +8,15 @@ import {
   wrap,
 } from "../../utils";
 import { isUrlIgnored } from "../../utils/ignore-rules";
-import { addAttribute, endSpan, InProgressSpan, recordException, setSpanStatus, startSpan } from "../../utils/otel";
+import {
+  addAttribute,
+  endSpan,
+  Exception,
+  InProgressSpan,
+  recordException,
+  setSpanStatus,
+  startSpan,
+} from "../../utils/otel";
 import {
   ERROR_TYPE,
   HTTP_REQUEST_METHOD,
@@ -159,8 +167,43 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
       cleanupFailedSend(this, state);
       debug("failed to instrument XMLHttpRequest.send", e);
     }
-    return original.call(this, body);
+
+    try {
+      return original.call(this, body);
+    } catch (e) {
+      // Synchronous XHR reports network errors and timeouts by making send() throw -- per spec
+      // no loadend fires for sync failures, so onLoadEnd never runs and this is the only place
+      // the request can be finalized.
+      endSpanOnSyncSendError(this, state, e);
+      throw e;
+    }
   };
+}
+
+function endSpanOnSyncSendError(xhr: InstrumentedXhr, state: XhrState, error: unknown) {
+  if (state.completed) return;
+  state.completed = true;
+
+  try {
+    for (const [eventType, listener] of state.listeners ?? []) {
+      removeEventListener(xhr, eventType, listener);
+    }
+    state.performanceObserver?.cancel();
+
+    const span = state.span;
+    if (!span) return;
+
+    const failureKind: XhrFailureKind =
+      state.failureKind ?? ((error as { name?: unknown } | null)?.name === "TimeoutError" ? "timeout" : "error");
+    recordException(
+      span,
+      (error as Exception) ?? { name: failureKind, message: `XMLHttpRequest failed: ${state.url}` }
+    );
+    addAttribute(span.attributes, ERROR_TYPE, failureKind);
+    sendSpan(endSpan(span, { code: SPAN_STATUS_ERROR, message: `XMLHttpRequest failed: ${state.url}` }, undefined));
+  } catch (_e) {
+    // Best-effort only -- never mask the page's original exception from send().
+  }
 }
 
 function onSend(xhr: InstrumentedXhr, state: XhrState) {

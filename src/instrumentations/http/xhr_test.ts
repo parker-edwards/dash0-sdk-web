@@ -48,8 +48,19 @@ class FakeXMLHttpRequest extends EventTarget {
     this.requestHeaders[name] = existing ? `${existing}, ${value}` : value;
   }
 
+  /**
+   * When set, send() throws this error synchronously without firing any events, modeling the
+   * spec's sync-XHR error handling: a network error or timeout on open(..., false) makes send()
+   * throw and loadend never fires.
+   */
+  syncSendError?: Error;
+
   send(body?: unknown) {
     this.sentBody = body;
+    if (this.syncSendError) {
+      this.readyState = FakeXMLHttpRequest.DONE;
+      throw this.syncSendError;
+    }
   }
 
   getAllResponseHeaders(): string {
@@ -341,6 +352,73 @@ describe("xhr test", () => {
     expect(span.status?.code).toBe(2);
     expect(span.events.some((e) => e.name === "exception")).toBe(true);
     expect(span.attributes).toContainEqual({ key: "error.type", value: { stringValue: "timeout" } });
+  });
+
+  it("ends the span as an error and rethrows unchanged when a synchronous send() throws", () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    const removeListenerSpy = vi.spyOn(xhr, "removeEventListener");
+    xhr.open("GET", "/api/test", false);
+    const networkError = new DOMException("A network error occurred.", "NetworkError");
+    xhr.syncSendError = networkError;
+
+    let caught: unknown;
+    try {
+      xhr.send();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(networkError);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(2);
+    expect(span.attributes).toContainEqual({ key: "error.type", value: { stringValue: "error" } });
+    expect(span.events.some((e) => e.name === "exception")).toBe(true);
+
+    // The per-request listeners must not leak -- loadend never fires for sync failures.
+    expect(removeListenerSpy).toHaveBeenCalledTimes(4);
+    expect(removeListenerSpy.mock.calls.map((c) => c[0]).sort()).toEqual(["abort", "error", "loadend", "timeout"]);
+  });
+
+  it("classifies a synchronous send() TimeoutError as a timeout", () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test", false);
+    xhr.syncSendError = new DOMException("The request timed out.", "TimeoutError");
+
+    expect(() => xhr.send()).toThrow();
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    expect(sendSpanMock).toHaveBeenCalledTimes(1);
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    expect(span.status?.code).toBe(2);
+    expect(span.attributes).toContainEqual({ key: "error.type", value: { stringValue: "timeout" } });
+  });
+
+  it("still instruments a subsequent request on the same instance after a synchronous send() failure", async () => {
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test", false);
+    xhr.syncSendError = new DOMException("A network error occurred.", "NetworkError");
+    expect(() => xhr.send()).toThrow();
+
+    xhr.syncSendError = undefined;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+    xhr.respond(200);
+
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
+    const secondSpan = sendSpanMock.mock.calls[1]![0] as Span;
+    expect(secondSpan.attributes).toContainEqual({
+      key: "http.response.status_code",
+      value: { stringValue: "200" },
+    });
   });
 
   it("marks the span as cancelled (not failed) on abort", () => {
