@@ -1,11 +1,7 @@
 import { SPAN_KIND_CLIENT } from "../../../../src/semantic-conventions";
 import { sharedAfterEach, sharedBeforeEach } from "../shared";
 import { loadPage, retry } from "../utils";
-import { expectNoBrowserErrors, expectSpanCount, expectSpanMatching } from "../expectations";
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+import { expectNoBrowserErrors, expectNoSpanMatching, expectSpanMatching } from "../expectations";
 
 describe("XHR Instrumentation", () => {
   beforeEach(sharedBeforeEach);
@@ -48,15 +44,28 @@ describe("XHR Instrumentation", () => {
 
     const btn = await $("button=Cross Origin XHR");
     await btn.click();
-    await sleep(500);
 
-    const ajaxResponse = await fetch("http://localhost.lambdatest.com:8012/ajax-requests");
-    const ajaxRequests = await ajaxResponse.json();
-    const postRequest = ajaxRequests.find((req: any) => req.method == "POST");
+    await retry(async () => {
+      // The page targets `http://${window.location.hostname}:8012`, so the hostname differs
+      // between local runs and remote (LambdaTest) runs -- match on method and path only.
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP POST",
+          attributes: expect.arrayContaining([
+            { key: "http.request.method", value: { stringValue: "POST" } },
+            { key: "url.path", value: { stringValue: "/ajax" } },
+          ]),
+        })
+      );
 
-    expect(postRequest).toBeDefined();
-    expect(postRequest.headers).toHaveProperty("traceparent");
-    expect(postRequest.headers["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+      const ajaxResponse = await fetch("http://localhost.lambdatest.com:8012/ajax-requests");
+      const ajaxRequests = await ajaxResponse.json();
+      const postRequest = ajaxRequests.find((req: any) => req.method == "POST");
+
+      expect(postRequest).toBeDefined();
+      expect(postRequest.headers).toHaveProperty("traceparent");
+      expect(postRequest.headers["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    });
 
     expectNoBrowserErrors();
   });
@@ -110,7 +119,18 @@ describe("XHR Instrumentation", () => {
     await okBtn.click();
 
     await retry(async () => {
-      await expectSpanCount(1);
+      // Gate on the non-ignored span first -- once it has arrived, the ignored request's span
+      // (fired back-to-back with it, so batched together if it existed) must not be present.
+      await expectSpanMatching(
+        expect.objectContaining({
+          attributes: expect.arrayContaining([{ key: "url.path", value: { stringValue: "/ajax" } }]),
+        })
+      );
+      await expectNoSpanMatching(
+        expect.objectContaining({
+          attributes: expect.arrayContaining([{ key: "url.path", value: { stringValue: "/you-cant-see-this" } }]),
+        })
+      );
     });
     expectNoBrowserErrors();
   });
