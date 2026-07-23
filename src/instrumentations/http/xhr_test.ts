@@ -410,6 +410,20 @@ describe("xhr test", () => {
     const span = sendSpanMock.mock.calls[0]![0] as Span;
     expect(span.name).toBe("HTTP GET");
     expect(span.attributes).toContainEqual({ key: "http.request.method", value: { stringValue: "GET" } });
+
+    const xhr2 = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr2.open("FROBNICATE", "/api/test");
+    xhr2.send();
+    xhr2.respond(200);
+
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(2));
+    const otherSpan = sendSpanMock.mock.calls[1]![0] as Span;
+    expect(otherSpan.name).toBe("HTTP _OTHER");
+    expect(otherSpan.attributes).toContainEqual({ key: "http.request.method", value: { stringValue: "_OTHER" } });
+    expect(otherSpan.attributes).toContainEqual({
+      key: "http.request.method_original",
+      value: { stringValue: "FROBNICATE" },
+    });
   });
 
   it("is safe to call instrumentXhr() twice (double-instrumentation guard)", async () => {
