@@ -156,6 +156,149 @@ describe("XHR Instrumentation", () => {
     expectNoBrowserErrors();
   });
 
+  it("must send an erroneous span when an XHR request fails", async () => {
+    await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
+    await expect(browser).toHaveTitle("xhr instrumentation test");
+
+    const btn = await $("button=Failing XHR");
+    await btn.click();
+
+    await retry(async () => {
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP GET",
+          attributes: expect.arrayContaining([
+            { key: "url.path", value: { stringValue: "/destroy-connection" } },
+            { key: "url.query", value: { stringValue: "xhr=async-error" } },
+            { key: "error.type", value: { stringValue: "error" } },
+          ]),
+          events: expect.arrayContaining([
+            expect.objectContaining({
+              name: "exception",
+              attributes: expect.arrayContaining([
+                { key: "exception.type", value: { stringValue: "error" } },
+                { key: "exception.message", value: { stringValue: expect.stringContaining("XMLHttpRequest failed") } },
+              ]),
+            }),
+          ]),
+          status: expect.objectContaining({ code: 2 }),
+        })
+      );
+    });
+    // No expectNoBrowserErrors() here: browsers log the failed network request as a console error.
+  });
+
+  it("must send an erroneous span with error.type timeout when an XHR request times out", async () => {
+    await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
+    await expect(browser).toHaveTitle("xhr instrumentation test");
+
+    const btn = await $("button=Timeout XHR");
+    await btn.click();
+
+    await retry(async () => {
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP GET",
+          attributes: expect.arrayContaining([
+            { key: "url.path", value: { stringValue: "/delay-fetch" } },
+            { key: "url.query", value: { stringValue: "xhr=timeout" } },
+            { key: "error.type", value: { stringValue: "timeout" } },
+          ]),
+          events: expect.arrayContaining([
+            expect.objectContaining({
+              name: "exception",
+              attributes: expect.arrayContaining([
+                { key: "exception.type", value: { stringValue: "timeout" } },
+                { key: "exception.message", value: { stringValue: expect.stringContaining("XMLHttpRequest failed") } },
+              ]),
+            }),
+          ]),
+          status: expect.objectContaining({ code: 2 }),
+        })
+      );
+    });
+    // No expectNoBrowserErrors() here: browsers log the timed-out request as a console error.
+  });
+
+  it("must mark aborted XHR requests as cancelled, not failed", async () => {
+    await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
+    await expect(browser).toHaveTitle("xhr instrumentation test");
+
+    const btn = await $("button=Aborted XHR");
+    await btn.click();
+
+    await retry(async () => {
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP GET",
+          attributes: expect.arrayContaining([
+            { key: "url.query", value: { stringValue: "xhr=abort" } },
+            { key: "dash0.web.request.cancelled", value: { boolValue: true } },
+          ]),
+          status: expect.objectContaining({ code: 0 }),
+          events: expect.not.arrayContaining([expect.objectContaining({ name: "exception" })]),
+        })
+      );
+    });
+    expectNoBrowserErrors();
+  });
+
+  it("must pass the request body through unchanged", async () => {
+    await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
+    await expect(browser).toHaveTitle("xhr instrumentation test");
+
+    const btn = await $("button=XHR With Body");
+    await btn.click();
+
+    await retry(async () => {
+      // The server compares the received body against the assert-body query parameter and
+      // responds 400 on mismatch, so a 200 proves the body arrived unchanged.
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP POST",
+          attributes: expect.arrayContaining([
+            { key: "url.full", value: { stringValue: expect.stringContaining("/ajax?assert-body") } },
+            { key: "http.response.status_code", value: { stringValue: "200" } },
+          ]),
+        })
+      );
+    });
+    expectNoBrowserErrors();
+  });
+
+  it("must send an erroneous span when a synchronous XHR request fails", async () => {
+    await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
+    await expect(browser).toHaveTitle("xhr instrumentation test");
+
+    const btn = await $("button=Failing Sync XHR");
+    await btn.click();
+
+    await retry(async () => {
+      await expectSpanMatching(
+        expect.objectContaining({
+          name: "HTTP GET",
+          attributes: expect.arrayContaining([
+            { key: "url.query", value: { stringValue: "xhr=sync-error" } },
+            { key: "error.type", value: { stringValue: "error" } },
+          ]),
+          events: expect.arrayContaining([
+            expect.objectContaining({
+              name: "exception",
+              // The real DOMException thrown by sync send() is recorded here; browsers differ
+              // on whether the legacy numeric code or the name is reported -- assert loosely.
+              attributes: expect.arrayContaining([
+                { key: "exception.type", value: { stringValue: expect.any(String) } },
+                { key: "exception.message", value: { stringValue: expect.any(String) } },
+              ]),
+            }),
+          ]),
+          status: expect.objectContaining({ code: 2 }),
+        })
+      );
+    });
+    // No expectNoBrowserErrors() here: browsers log the failed network request as a console error.
+  });
+
   it("must send spans for axios requests (axios defaults to the XHR adapter in browsers)", async () => {
     await loadPage("/e2e/spec/09-xhr-instrumentation/page.html");
     await expect(browser).toHaveTitle("xhr instrumentation test");

@@ -95,6 +95,62 @@
       XHR with X-Ray
     </button>
 
+    <button
+      onclick="(function(){
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/destroy-connection?xhr=async-error');
+        xhr.send();
+      })()"
+    >
+      Failing XHR
+    </button>
+
+    <button
+      onclick="(function(){
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/delay-fetch?xhr=timeout');
+        xhr.timeout = 500;
+        xhr.send();
+      })()"
+    >
+      Timeout XHR
+    </button>
+
+    <button
+      onclick="(function(){
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', '/delay-fetch?xhr=abort');
+        xhr.send();
+        xhr.abort();
+      })()"
+    >
+      Aborted XHR
+    </button>
+
+    <button
+      onclick="(function(){
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/ajax?assert-body=this_is_an_xhr_message');
+        xhr.send('this_is_an_xhr_message');
+      })()"
+    >
+      XHR With Body
+    </button>
+
+    <button
+      onclick="(function(){
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', '/destroy-connection?xhr=sync-error', false);
+          xhr.send();
+        } catch (e) {
+          // Expected: synchronous XHR reports network errors by making send() throw.
+        }
+      })()"
+    >
+      Failing Sync XHR
+    </button>
+
     <button onclick="axios.get('/ajax?thisIsAxios=test')">Axios GET</button>
   </body>
 </html>
