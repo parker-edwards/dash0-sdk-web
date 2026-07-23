@@ -304,6 +304,99 @@ describe("xhr test", () => {
     expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.x-test-header" }));
   });
 
+  it("does not capture the SDK's own injected trace context headers as span attributes", async () => {
+    vars.headersToCapture = [/.*/];
+    vars.propagators = [
+      { type: "traceparent", match: [] },
+      { type: "xray", match: [] },
+    ];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.send();
+
+    // Injection itself must still happen ...
+    expect(xhr.requestHeaders["traceparent"]).toBeDefined();
+    expect(xhr.requestHeaders["X-Amzn-Trace-Id"]).toBeDefined();
+
+    xhr.respond(200);
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+    const span = sendSpanMock.mock.calls[0]![0] as Span;
+    // ... but like fetch, the SDK-injected headers must not surface as request-header attributes,
+    // even under a catch-all capture pattern.
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.traceparent" }));
+    expect(span.attributes).not.toContainEqual(expect.objectContaining({ key: "http.request.header.x-amzn-trace-id" }));
+  });
+
+  it("skips span creation and injection when a traceparent header is already present (fetch polyfill over XHR)", async () => {
+    vars.propagators = [{ type: "traceparent", match: [] }];
+    instrumentXhr();
+
+    // Models a fetch polyfill built on XHR: the fetch instrumentation already created a span and
+    // injected trace context for this logical request, and the polyfill replays the headers onto
+    // the underlying XHR.
+    const existing = "00-4efaaf4d1e8720b39541901950019ee5-53995c3f42cd8ad8-01";
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("traceparent", existing);
+    xhr.send();
+    xhr.respond(200);
+
+    // No second injection -- the XHR spec would combine the values into one invalid
+    // comma-joined traceparent.
+    expect(xhr.requestHeaders["traceparent"]).toBe(existing);
+    // And no second span for the same logical request.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("detects already-present correlation headers case-insensitively and for X-Ray", async () => {
+    vars.propagators = [{ type: "traceparent", match: [] }];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/test");
+    xhr.setRequestHeader("X-Amzn-Trace-Id", "Root=1-4efaaf4d-1e8720b39541901950019ee5");
+    xhr.send();
+    xhr.respond(200);
+
+    expect(xhr.requestHeaders["traceparent"]).toBeUndefined();
+
+    const xhr2 = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr2.open("GET", "/api/test");
+    xhr2.setRequestHeader("Traceparent", "00-4efaaf4d1e8720b39541901950019ee5-53995c3f42cd8ad8-01");
+    xhr2.send();
+    xhr2.respond(200);
+
+    expect(xhr2.requestHeaders["traceparent"]).toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(sendSpan).not.toHaveBeenCalled();
+  });
+
+  it("instruments the next request on a reused instance after skipping an already-traced one", async () => {
+    vars.propagators = [{ type: "traceparent", match: [] }];
+    instrumentXhr();
+
+    const xhr = new XMLHttpRequest() as unknown as FakeXMLHttpRequest;
+    xhr.open("GET", "/api/first");
+    xhr.setRequestHeader("traceparent", "00-4efaaf4d1e8720b39541901950019ee5-53995c3f42cd8ad8-01");
+    xhr.send();
+    xhr.respond(200);
+    expect(sendSpan).not.toHaveBeenCalled();
+
+    // open() resets the per-request state, so the next request must be traced normally.
+    xhr.open("GET", "/api/second");
+    xhr.send();
+    expect(xhr.requestHeaders["traceparent"]).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+
+    xhr.respond(200);
+    const sendSpanMock = sendSpan as unknown as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(sendSpanMock).toHaveBeenCalledTimes(1));
+  });
+
   it("normalizes well-known methods to uppercase and records HTTP_METHOD_OTHER for unknown methods", async () => {
     instrumentXhr();
 

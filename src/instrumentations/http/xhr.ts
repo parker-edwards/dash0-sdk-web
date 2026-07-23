@@ -47,6 +47,9 @@ type XhrState = {
   isWellKnownMethod: boolean;
   url: string;
   ignored: boolean;
+  // Set when page code (typically a fetch polyfill whose fetch() the SDK already instrumented)
+  // put a trace correlation header on this request before send() -- see onSetRequestHeader.
+  alreadyTraced?: boolean;
   span?: InProgressSpan;
   propagatorTypes: PropagatorType[];
   capturedRequestHeaders?: Record<string, string>;
@@ -59,6 +62,11 @@ type XhrState = {
 const XHR_STATE = Symbol("dash0XhrState");
 
 type InstrumentedXhr = XMLHttpRequest & { [XHR_STATE]?: XhrState };
+
+// The un-wrapped setRequestHeader, captured when wrapping. Trace context headers are injected
+// through it so the SDK's own headers neither land in capturedRequestHeaders nor trip the
+// already-traced detection below.
+let originalSetRequestHeader: XMLHttpRequest["setRequestHeader"] | undefined;
 
 export function instrumentXhr() {
   if (!win || !win.XMLHttpRequest) {
@@ -126,6 +134,9 @@ function onOpen(xhr: InstrumentedXhr, method: string, url: string | URL): string
 }
 
 function wrapSetRequestHeader(original: XMLHttpRequest["setRequestHeader"]): XMLHttpRequest["setRequestHeader"] {
+  // wrap() only invokes this factory when it actually wraps (it skips already-instrumented
+  // targets), so this can never capture the SDK's own wrapper on double instrumentation.
+  originalSetRequestHeader = original;
   return function (this: InstrumentedXhr, name: string, value: string) {
     original.call(this, name, value);
 
@@ -141,13 +152,27 @@ function onSetRequestHeader(xhr: InstrumentedXhr, name: string, value: string) {
   const state = xhr[XHR_STATE];
   if (!state || state.ignored) return;
 
-  // Filter at capture time like the fetch instrumentation -- never retain unmatched
-  // (potentially sensitive) headers on the page-reachable XHR instance.
-  if (vars.headersToCapture.length === 0) return;
-
   // Match against the lowercased name so a regex behaves the same here as for fetch,
   // where Headers iteration yields lowercased names.
   const lowerName = name.toLowerCase();
+
+  // A trace correlation header showing up here means someone else is already tracing this
+  // request -- the SDK injects its own headers via the un-wrapped setRequestHeader, so it never
+  // trips this. The typical source is a fetch polyfill built on XHR: the fetch instrumentation
+  // has already created a span and injected headers for the logical request, and the polyfill
+  // replays them onto the underlying XHR. send() skips span creation and injection for such
+  // requests -- a second injection would combine into one invalid comma-joined header value,
+  // and a second span would double-report the request (the fetch span's resource matcher
+  // already accepts initiatorType "xmlhttprequest" to cover polyfills). Note this only
+  // detects the polyfill case when the fetch side actually injected headers (a propagator
+  // matched the URL) -- without that, the polyfill case still yields two spans.
+  if (lowerName === "traceparent" || lowerName === "x-amzn-trace-id") {
+    state.alreadyTraced = true;
+  }
+
+  // Filter at capture time like the fetch instrumentation -- never retain unmatched
+  // (potentially sensitive) headers on the page-reachable XHR instance.
+  if (vars.headersToCapture.length === 0) return;
   if (!vars.headersToCapture.some((rxp) => rxp.test(lowerName))) return;
 
   const headers = (state.capturedRequestHeaders ??= {});
@@ -163,6 +188,13 @@ function wrapSend(original: XMLHttpRequest["send"]): XMLHttpRequest["send"] {
       if (state?.ignored) {
         debug(`Not creating span for XMLHttpRequest because the url is ignored, URL: ${state.url}`);
       }
+      return original.call(this, body);
+    }
+
+    if (state.alreadyTraced) {
+      debug(
+        `Not creating span for XMLHttpRequest because a trace correlation header is already present, URL: ${state.url}`
+      );
       return original.call(this, body);
     }
 
@@ -230,7 +262,12 @@ function onSend(xhr: InstrumentedXhr, state: XhrState) {
 
   if (state.propagatorTypes.length > 0) {
     try {
-      addTraceContextHttpHeaders((name, value) => xhr.setRequestHeader(name, value), xhr, span, state.propagatorTypes);
+      addTraceContextHttpHeaders(
+        (name, value) => (originalSetRequestHeader ?? xhr.setRequestHeader).call(xhr, name, value),
+        xhr,
+        span,
+        state.propagatorTypes
+      );
     } catch (e) {
       // setRequestHeader throws InvalidStateError if called before open() succeeded, or after
       // send(). This should not normally happen since we only reach here from within send()
