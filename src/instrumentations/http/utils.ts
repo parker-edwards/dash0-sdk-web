@@ -11,7 +11,7 @@ import {
 } from "../../utils/otel";
 import { domHRTimestampToNanos, hasKey, isSameOrigin, PerformanceTimingNames } from "../../utils";
 import { matchesAny } from "../../utils/ignore-rules";
-import { HTTP_RESPONSE_BODY_SIZE, WEB_REQUEST_CANCELLED } from "../../semantic-conventions";
+import { ERROR_TYPE, HTTP_RESPONSE_BODY_SIZE, WEB_REQUEST_CANCELLED } from "../../semantic-conventions";
 import { vars, PropagatorType } from "../../vars";
 import { sendSpan } from "../../transport";
 
@@ -61,11 +61,24 @@ export function addResourceSize(span: InProgressSpan, resource: PerformanceResou
   }
 }
 
+// Sets error.type alongside the recorded exception so failed fetch and XHR spans are equally
+// queryable by error.type. The value is the exception name (e.g. TypeError) -- XHR's synthetic
+// failure exceptions carry their failure kind ("error"/"timeout") as the name, so both
+// instrumentations converge here. Note the shapes still differ for cases inherent to the APIs:
+// a fetch that resolves with status 0 (e.g. opaque responses) never reaches this function and
+// instead gets error.type = response.type plus http.response.status_code "0".
 export function endSpanOnError(span: InProgressSpan, error: Exception) {
   recordException(span, error);
+  const errorType =
+    typeof error === "object" && error ? (error.name ?? (error.code != null ? String(error.code) : "error")) : "error";
+  addAttribute(span.attributes, ERROR_TYPE, errorType);
   sendSpan(endSpan(span, errorToSpanStatus(error), undefined));
 }
 
+// Cancellations are benign: no error status, no error.type. This also covers fetch calls aborted
+// by AbortSignal.timeout() -- the signal is aborted by the time the rejection is handled, so a
+// fetch timeout surfaces as a cancellation while an XHR timeout is an ERROR span with
+// error.type = "timeout". That asymmetry is inherent to the two APIs.
 export function endSpanOnAbort(span: InProgressSpan) {
   addAttribute(span.attributes, WEB_REQUEST_CANCELLED, true);
   sendSpan(endSpan(span, undefined, undefined));

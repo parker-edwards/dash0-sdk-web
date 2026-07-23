@@ -338,6 +338,35 @@ describe("fetch test", () => {
       expect(span.status?.message).toBe("network down");
       expect(hasAttribute(span, "dash0.web.request.cancelled", { boolValue: true })).toBe(false);
       expect(span.events.some((e) => e.name === "exception")).toBe(true);
+      expect(hasAttribute(span, "error.type", { stringValue: "TypeError" })).toBe(true);
+    });
+
+    it("sets error.type from the exception name when reading the response body fails", async () => {
+      const body = new ReadableStream({
+        start(streamController) {
+          streamController.enqueue(new Uint8Array([0x68, 0x69]));
+        },
+        pull(streamController) {
+          streamController.error(new TypeError("network down"));
+        },
+      });
+
+      fetchMock.mockImplementation(() => Promise.resolve(new Response(body, { status: 200 })));
+
+      instrumentFetch();
+      // eslint-disable-next-line no-restricted-globals
+      const response = await fetch("http://localhost:3000/api/test");
+      const reader = response.body!.getReader();
+      await reader.read();
+      await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+
+      expect(sendSpanMock).toHaveBeenCalledTimes(1);
+      const span = lastSpan();
+      expect(span.status?.code).toBe(2);
+      expect(span.status?.message).toBe("network down");
+      expect(hasAttribute(span, "dash0.web.request.cancelled", { boolValue: true })).toBe(false);
+      expect(span.events.some((e) => e.name === "exception")).toBe(true);
+      expect(hasAttribute(span, "error.type", { stringValue: "TypeError" })).toBe(true);
     });
   });
 });

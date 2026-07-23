@@ -34,6 +34,7 @@ import {
   addTraceContextHttpHeaders,
   determinePropagatorTypes,
   endSpanOnAbort,
+  endSpanOnError,
   HTTP_METHOD_OTHER,
   isWellKnownHttpMethod,
 } from "./utils";
@@ -388,12 +389,11 @@ function onLoadEnd(xhr: InstrumentedXhr, state: XhrState) {
   }
 
   if (state.failureKind === "error" || state.failureKind === "timeout" || status === 0) {
-    // diverges from endSpanOnError because we additionally set ERROR_TYPE
     performanceObserver?.cancel();
     const failureKind = state.failureKind ?? "error";
-    recordException(span, { name: failureKind, message: `XMLHttpRequest failed: ${state.url}` });
-    addAttribute(span.attributes, ERROR_TYPE, failureKind);
-    sendSpan(endSpan(span, { code: SPAN_STATUS_ERROR, message: `XMLHttpRequest failed: ${state.url}` }, undefined));
+    // The failure kind doubles as the exception name, so endSpanOnError derives
+    // error.type = failureKind from it.
+    endSpanOnError(span, { name: failureKind, message: `XMLHttpRequest failed: ${state.url}` });
     return;
   }
 
