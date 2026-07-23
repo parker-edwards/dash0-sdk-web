@@ -401,11 +401,7 @@ function onLoadEnd(xhr: InstrumentedXhr, state: XhrState) {
   addAttribute(span.attributes, HTTP_RESPONSE_STATUS_CODE, String(status));
   tryCaptureResponseHeaders(xhr, span);
 
-  if (!performanceObserver) {
-    sendSpan(endSpan(span, undefined, undefined));
-    return;
-  }
-  performanceObserver.end();
+  performanceObserver?.end();
 }
 
 function tryCaptureResponseHeaders(xhr: XMLHttpRequest, span: InProgressSpan) {
