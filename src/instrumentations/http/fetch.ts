@@ -204,8 +204,8 @@ function tryCaptureHttpHeaders(headers: Headers, span: InProgressSpan, getAttrib
         addAttribute(span.attributes, getAttributeKey(key), value);
       }
     });
-  } catch (_e) {
-    debug("unable to capture http headers due to CORS policy");
+  } catch (e) {
+    debug("unable to capture http headers", e);
   }
 }
 

@@ -425,7 +425,7 @@ function tryCaptureResponseHeaders(xhr: XMLHttpRequest, span: InProgressSpan) {
           addAttribute(span.attributes, httpResponseHeaderKey(name), value);
         }
       });
-  } catch (_e) {
-    debug("unable to capture http response headers due to CORS policy");
+  } catch (e) {
+    debug("unable to capture http response headers", e);
   }
 }
